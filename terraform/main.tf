@@ -12,13 +12,27 @@ provider "aws" {
   region = "us-west-2"
 }
 
+# =====================================================================
+# EDIT THESE TWO EVERY SESSION. The lab pre-creates VPC-Onprem and its
+# public subnets and hands you fresh IDs each session (new account each
+# time). Get them from the lab step or with:
+#   aws ec2 describe-vpcs --filters Name=tag:Name,Values=VPC-Onprem \
+#     --query "Vpcs[0].VpcId" --output text
+#   aws ec2 describe-subnets --filters Name=vpc-id,Values=<vpc> \
+#     --query "Subnets[].{Id:SubnetId,CIDR:CidrBlock,AZ:AvailabilityZone}" --output table
+# =====================================================================
+locals {
+  vpc_id           = "vpc-0fa1ebe2a06b3ff6b"     # this session's VPC-Onprem
+  public_subnet_id = "subnet-0a163e064eeeb7f68"  # this session's Public Subnet 1
+}
+
 variable "key_name" {
-  description = "Name of an existing EC2 key pair in us-west-2 for SSH access"
+  description = "Name of the lab EC2 key pair in us-west-2"
   type        = string
 }
 
 variable "admin_cidr" {
-  description = "Source CIDR allowed to SSH to public instances (tighten from 0.0.0.0/0 if you can)"
+  description = "Source CIDR allowed to SSH to public instances"
   type        = string
   default     = "0.0.0.0/0"
 }
@@ -27,6 +41,15 @@ variable "onprem_cidr" {
   description = "On-premises supernet reachable over the VPN"
   type        = string
   default     = "10.10.0.0/16"
+}
+
+# ---- Read the lab VPC + public subnet; do NOT create or modify them ----
+data "aws_vpc" "lab" {
+  id = local.vpc_id
+}
+
+data "aws_subnet" "public" {
+  id = local.public_subnet_id
 }
 
 data "aws_ami" "al2023" {
@@ -42,51 +65,19 @@ data "aws_ami" "al2023" {
   }
 }
 
-# ---------------- Network ----------------
-
-resource "aws_vpc" "main" {
-  cidr_block           = "10.20.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags                 = { Name = "fuego-vpc" }
-}
-
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.main.id
-  tags   = { Name = "fuego-igw" }
-}
-
-resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.20.1.0/24"
-  availability_zone       = "us-west-2a"
-  map_public_ip_on_launch = true
-  tags                    = { Name = "fuego-public" }
-}
+# ---------------- Network (only the private subnet is ours) ----------------
 
 resource "aws_subnet" "private" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.20.2.0/24"
-  availability_zone = "us-west-2a"
+  vpc_id            = local.vpc_id
+  cidr_block        = cidrsubnet(data.aws_vpc.lab.cidr_block, 8, 30) # 10.X.30.0/24 in a /16 VPC; change 30 if it collides
+  availability_zone = data.aws_subnet.public.availability_zone
   tags              = { Name = "fuego-private" }
-}
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
-  }
-  tags = { Name = "fuego-public-rt" }
-}
-
-resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.public.id
+  # No map_public_ip_on_launch: setting it would call ModifySubnetAttribute,
+  # which the lab IAM denies. A private subnet does not need it.
 }
 
 resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.main.id
+  vpc_id = local.vpc_id
   tags   = { Name = "fuego-private-rt" }
 }
 
@@ -95,7 +86,7 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private.id
 }
 
-# Sends on-prem-bound traffic to the VPN gateway instance (used once the tunnel is up in the VPN phase)
+# Return path: on-prem-bound traffic from the DB goes to the VPN gateway ENI
 resource "aws_route" "private_to_onprem" {
   route_table_id         = aws_route_table.private.id
   destination_cidr_block = var.onprem_cidr
@@ -107,7 +98,7 @@ resource "aws_route" "private_to_onprem" {
 resource "aws_security_group" "web" {
   name        = "fuego-sg-web"
   description = "Web portal: HTTP from anywhere, SSH from admin"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = local.vpc_id
 
   ingress {
     description = "HTTP"
@@ -134,8 +125,8 @@ resource "aws_security_group" "web" {
 
 resource "aws_security_group" "db" {
   name        = "fuego-sg-db"
-  description = "Database: app port from the web tier and the on-prem office over VPN only"
-  vpc_id      = aws_vpc.main.id
+  description = "Database: app port from web tier and on-prem office over VPN"
+  vpc_id      = local.vpc_id
 
   ingress {
     description     = "DB port from web tier"
@@ -152,7 +143,7 @@ resource "aws_security_group" "db" {
     cidr_blocks = ["10.10.10.0/24"]
   }
   ingress {
-    description = "ICMP from on-prem office over VPN (tunnel reachability test)"
+    description = "ICMP from on-prem office over VPN (tunnel reachability)"
     from_port   = -1
     to_port     = -1
     protocol    = "icmp"
@@ -163,7 +154,7 @@ resource "aws_security_group" "db" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["10.20.0.0/16"]
+    cidr_blocks = [data.aws_vpc.lab.cidr_block]
   }
   egress {
     from_port   = 0
@@ -176,8 +167,8 @@ resource "aws_security_group" "db" {
 
 resource "aws_security_group" "vpn_gw" {
   name        = "fuego-sg-vpngw"
-  description = "VPN gateway: IKE and NAT-T from internet, forwarding for VPC and on-prem"
-  vpc_id      = aws_vpc.main.id
+  description = "VPN gateway: IKE/NAT-T from internet, forwarding for VPC and on-prem"
+  vpc_id      = local.vpc_id
 
   ingress {
     description = "IKE"
@@ -205,7 +196,7 @@ resource "aws_security_group" "vpn_gw" {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
-    cidr_blocks = ["10.20.0.0/16"]
+    cidr_blocks = [data.aws_vpc.lab.cidr_block]
   }
   ingress {
     description = "Decapsulated traffic from on-prem"
@@ -224,14 +215,14 @@ resource "aws_security_group" "vpn_gw" {
 }
 
 resource "aws_network_acl" "private" {
-  vpc_id     = aws_vpc.main.id
+  vpc_id     = local.vpc_id
   subnet_ids = [aws_subnet.private.id]
 
   ingress {
     rule_no    = 100
     action     = "allow"
     protocol   = "-1"
-    cidr_block = "10.20.0.0/16"
+    cidr_block = data.aws_vpc.lab.cidr_block
     from_port  = 0
     to_port    = 0
   }
@@ -247,7 +238,7 @@ resource "aws_network_acl" "private" {
     rule_no    = 100
     action     = "allow"
     protocol   = "-1"
-    cidr_block = "10.20.0.0/16"
+    cidr_block = data.aws_vpc.lab.cidr_block
     from_port  = 0
     to_port    = 0
   }
@@ -267,7 +258,7 @@ resource "aws_network_acl" "private" {
 resource "aws_instance" "web" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = "t2.micro"
-  subnet_id                   = aws_subnet.public.id
+  subnet_id                   = local.public_subnet_id
   vpc_security_group_ids      = [aws_security_group.web.id]
   key_name                    = var.key_name
   associate_public_ip_address = true
@@ -288,7 +279,7 @@ resource "aws_instance" "db" {
 resource "aws_instance" "vpn_gw" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = "t2.micro"
-  subnet_id                   = aws_subnet.public.id
+  subnet_id                   = local.public_subnet_id
   vpc_security_group_ids      = [aws_security_group.vpn_gw.id]
   key_name                    = var.key_name
   associate_public_ip_address = true
@@ -310,9 +301,10 @@ resource "aws_eip" "vpn_gw" {
 
 # ---------------- Outputs ----------------
 
-output "web_public_ip"     { value = aws_eip.web.public_ip }
-output "vpn_gw_public_ip"  { value = aws_eip.vpn_gw.public_ip }
-output "web_private_ip"    { value = aws_instance.web.private_ip }
-output "db_private_ip"     { value = aws_instance.db.private_ip }
-output "vpn_gw_private_ip" { value = aws_instance.vpn_gw.private_ip }
-output "vpc_id"            { value = aws_vpc.main.id }
+output "web_public_ip"      { value = aws_eip.web.public_ip }
+output "vpn_gw_public_ip"   { value = aws_eip.vpn_gw.public_ip }
+output "web_private_ip"     { value = aws_instance.web.private_ip }
+output "db_private_ip"      { value = aws_instance.db.private_ip }
+output "vpn_gw_private_ip"  { value = aws_instance.vpn_gw.private_ip }
+output "private_subnet_cidr" { value = aws_subnet.private.cidr_block }
+output "vpc_id"             { value = local.vpc_id }
