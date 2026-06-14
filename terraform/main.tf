@@ -23,7 +23,7 @@ provider "aws" {
 # =====================================================================
 locals {
   vpc_id           = "vpc-0cc3017dd6f11b6d0"     # this session's VPC-Onprem
-  public_subnet_id = "subnet-0a163e064eeeb7f68"  # this session's Public Subnet 1
+  public_subnet_id = "subnet-05ad00bb88cd57e40"  # this session's Public Subnet 1
 }
 
 variable "key_name" {
