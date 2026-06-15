@@ -22,8 +22,8 @@ provider "aws" {
 #     --query "Subnets[].{Id:SubnetId,CIDR:CidrBlock,AZ:AvailabilityZone}" --output table
 # =====================================================================
 locals {
-  vpc_id           = "vpc-0785bbf485c80495e"     # this session's VPC-Onprem
-  public_subnet_id = "subnet-04f2887faa1ab2257"  # this session's Public Subnet 1
+  vpc_id           = "vpc-0cc60c872143c3104"     # this session's VPC-Onprem
+  public_subnet_id = "subnet-073e6d40ebb52136c"  # this session's Public Subnet 1
 }
 
 variable "key_name" {
